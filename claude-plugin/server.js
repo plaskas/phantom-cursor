@@ -148,10 +148,22 @@ async function cdpSnapshot(rootSelector = 'body') {
   }, [rootSelector]);
 }
 
-// ── Spotlight Focus System ─────────────────────────────────────
+// ── Agent Color Palette (Figma-style multiplayer) ─────────────
 
-async function cdpFocusElement(agentId, selector) {
-  return pageEval((sel) => {
+const AGENT_PALETTE = ['#7C6FFF', '#00C9A7', '#FF6B6B', '#FFB830', '#4ECDC4', '#C77DFF'];
+function agentColor(agentId) {
+  let h = 5381;
+  for (let i = 0; i < agentId.length; i++) h = ((h * 33) ^ agentId.charCodeAt(i)) >>> 0;
+  return AGENT_PALETTE[h % AGENT_PALETTE.length];
+}
+
+// ── Spotlight Focus System ─────────────────────────────────────
+// One spotlight overlay that moves to the active agent's element.
+// Each agent keeps a persistent colored name badge at their last position.
+
+async function cdpFocusElement(agentId, selector, action = 'focus') {
+  const color = agentColor(agentId);
+  return pageEval((sel, aid, col, act) => {
     const el = document.querySelector(sel);
     if (!el) return { ok: false, error: 'Element not found' };
     const r = el.getBoundingClientRect();
@@ -159,6 +171,7 @@ async function cdpFocusElement(agentId, selector) {
     const cy = r.top  + r.height / 2;
     const radius = Math.max(Math.max(r.width, r.height) / 2 + 60, 80);
 
+    // ── Spotlight overlay (colored tint from agent palette) ──
     let ov = document.getElementById('__phantom_spotlight');
     if (!ov) {
       ov = document.createElement('div');
@@ -166,60 +179,91 @@ async function cdpFocusElement(agentId, selector) {
       ov.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483644;';
       document.body.appendChild(ov);
     }
+    const hex = col.replace('#', '');
+    const rr = parseInt(hex.slice(0,2),16), gg = parseInt(hex.slice(2,4),16), bb = parseInt(hex.slice(4,6),16);
+    const dark = `rgba(${Math.round(rr*0.12)},${Math.round(gg*0.12)},${Math.round(bb*0.12)},0.82)`;
 
-    const fromX = ov._spotX ?? cx;
-    const fromY = ov._spotY ?? cy;
-    const fromR = ov._spotR ?? radius;
+    const fromX = ov._spotX ?? cx, fromY = ov._spotY ?? cy, fromR = ov._spotR ?? radius;
     const start = performance.now(), dur = 420;
-    const ease  = t => t < 0.5 ? 4*t*t*t : 1-Math.pow(-2*t+2,3)/2;
-
+    const ease = t => t < 0.5 ? 4*t*t*t : 1-Math.pow(-2*t+2,3)/2;
     if (ov._raf) cancelAnimationFrame(ov._raf);
     (function frame(now) {
       const t  = Math.min((now - start) / dur, 1), e = ease(t);
-      const x  = fromX + (cx     - fromX) * e;
-      const y  = fromY + (cy     - fromY) * e;
+      const x  = fromX + (cx - fromX) * e;
+      const y  = fromY + (cy - fromY) * e;
       const rd = fromR + (radius - fromR) * e;
-      const inner = Math.round(rd * 0.55);
-      const outer = Math.round(rd * 1.35);
+      const inner = Math.round(rd * 0.55), outer = Math.round(rd * 1.35);
       ov.style.background =
         `radial-gradient(circle ${Math.round(rd)}px at ${Math.round(x)}px ${Math.round(y)}px,` +
-        `transparent 0px,transparent ${inner}px,` +
-        `rgba(0,0,0,0.70) ${outer}px,rgba(0,0,0,0.70) 100%)`;
+        `transparent 0px,transparent ${inner}px,${dark} ${outer}px,${dark} 100%)`;
       if (t < 1) ov._raf = requestAnimationFrame(frame);
       else { ov._spotX = cx; ov._spotY = cy; ov._spotR = radius; ov._raf = null; }
     })(performance.now());
+
+    // ── Agent label badge (persistent, floats above spotlight) ──
+    const glyph = act === 'click' ? '↑' : act === 'browse' ? '⊡' : '◉';
+    let badge = document.getElementById('__phantom_label_' + aid);
+    if (!badge) {
+      badge = document.createElement('div');
+      badge.id = '__phantom_label_' + aid;
+      badge.style.cssText =
+        `position:fixed;pointer-events:none;z-index:2147483645;` +
+        `color:#fff;font:600 11px/1 -apple-system,ui-sans-serif,sans-serif;` +
+        `padding:5px 10px 5px 8px;border-radius:20px;white-space:nowrap;` +
+        `box-shadow:0 2px 8px rgba(0,0,0,0.35);` +
+        `transition:left 0.42s cubic-bezier(0.25,0.46,0.45,0.94),` +
+                   `top 0.42s cubic-bezier(0.25,0.46,0.45,0.94),opacity 0.15s;` +
+        `opacity:0;`;
+      document.body.appendChild(badge);
+    }
+    badge.textContent = `${glyph} ${aid}`;
+    badge.style.background = col;
+    // Position: above and right of spotlight center, clamped to viewport
+    const bw = badge.offsetWidth || 90;
+    const bx = Math.min(Math.round(cx) + 14, window.innerWidth - bw - 8);
+    const by = Math.max(Math.round(cy) - radius - 38, 8);
+    badge.style.left    = bx + 'px';
+    badge.style.top     = by + 'px';
+    badge.style.opacity = '1';
 
     return {
       ok: true,
       rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
     };
-  }, [selector]);
+  }, [selector, agentId, color, action]);
 }
 
 async function cdpClickElement(agentId, selector) {
-  const focus = await cdpFocusElement(agentId, selector);
+  const focus = await cdpFocusElement(agentId, selector, 'click');
   if (!focus?.ok) return focus;
 
-  await pageEval((sel, aid) => {
+  const color = agentColor(agentId);
+  await pageEval((sel, aid, col) => {
     const el = document.querySelector(sel); if (!el) return;
     const r = el.getBoundingClientRect();
     const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    // Click burst arrow
     let act = document.getElementById('__phantom_act_' + aid);
     if (!act) {
       act = document.createElement('div'); act.id = '__phantom_act_' + aid;
       act.style.cssText =
         'position:fixed;pointer-events:none;z-index:2147483647;' +
         'transition:transform 0.08s ease,opacity 0.12s ease;opacity:0;';
-      act.innerHTML =
-        '<svg width="20" height="24" viewBox="0 0 20 24" fill="none">' +
-        '<path d="M2 2L2 18L6.5 13.5L9.5 20L12 19L9 12.5L15 12.5L2 2Z"' +
-        ' fill="#fff" stroke="#7C6FFF" stroke-width="1.5" stroke-linejoin="round"/></svg>';
       document.body.appendChild(act);
     }
+    act.innerHTML =
+      `<svg width="20" height="24" viewBox="0 0 20 24" fill="none">` +
+      `<path d="M2 2L2 18L6.5 13.5L9.5 20L12 19L9 12.5L15 12.5L2 2Z"` +
+      ` fill="#fff" stroke="${col}" stroke-width="1.5" stroke-linejoin="round"/></svg>`;
     act.style.transform = `translate(${cx - 4}px,${cy - 2}px)`;
     act.style.opacity   = '1';
     setTimeout(() => { act.style.opacity = '0'; }, 500);
-  }, [selector, agentId]);
+    // Revert badge glyph from ↑ back to ◉ after click burst
+    setTimeout(() => {
+      const badge = document.getElementById('__phantom_label_' + aid);
+      if (badge) badge.textContent = `◉ ${aid}`;
+    }, 620);
+  }, [selector, agentId, color]);
 
   return focus;
 }
@@ -487,8 +531,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // ── phantom_navigate ───────────────────────────────────────
     if (name === 'phantom_navigate') {
       await pageEval(() => {
-        const ov = document.getElementById('__phantom_spotlight');
-        if (ov) ov.remove();
+        document.getElementById('__phantom_spotlight')?.remove();
+        document.querySelectorAll('[id^="__phantom_label_"]').forEach(el => el.remove());
+        document.querySelectorAll('[id^="__phantom_act_"]').forEach(el => el.remove());
       }).catch(() => {});
 
       await callCDT('navigate_page', { type: 'url', url: args.url });
@@ -502,7 +547,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // ── phantom_move ───────────────────────────────────────────
     if (name === 'phantom_move') {
       const agentId = args.agentId || 'default';
-      await pageEval((x, y) => {
+      const color = agentColor(agentId);
+      await pageEval((x, y, aid, col) => {
+        // Spotlight
         let ov = document.getElementById('__phantom_spotlight');
         if (!ov) {
           ov = document.createElement('div');
@@ -510,6 +557,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ov.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483644;';
           document.body.appendChild(ov);
         }
+        const hex = col.replace('#','');
+        const rr = parseInt(hex.slice(0,2),16), gg = parseInt(hex.slice(2,4),16), bb = parseInt(hex.slice(4,6),16);
+        const dark = `rgba(${Math.round(rr*0.12)},${Math.round(gg*0.12)},${Math.round(bb*0.12)},0.82)`;
         const fromX = ov._spotX ?? x, fromY = ov._spotY ?? y, fromR = ov._spotR ?? 100;
         const radius = 100;
         const start = performance.now(), dur = 350;
@@ -522,11 +572,31 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ov.style.background =
             `radial-gradient(circle ${Math.round(rd)}px at ${Math.round(cx)}px ${Math.round(cy)}px,` +
             `transparent 0px,transparent ${Math.round(rd*0.55)}px,` +
-            `rgba(0,0,0,0.70) ${Math.round(rd*1.35)}px,rgba(0,0,0,0.70) 100%)`;
+            `${dark} ${Math.round(rd*1.35)}px,${dark} 100%)`;
           if (t < 1) ov._raf = requestAnimationFrame(frame);
           else { ov._spotX = x; ov._spotY = y; ov._spotR = radius; ov._raf = null; }
         })(performance.now());
-      }, [args.x, args.y]);
+        // Label badge
+        let badge = document.getElementById('__phantom_label_' + aid);
+        if (!badge) {
+          badge = document.createElement('div');
+          badge.id = '__phantom_label_' + aid;
+          badge.style.cssText =
+            `position:fixed;pointer-events:none;z-index:2147483645;` +
+            `color:#fff;font:600 11px/1 -apple-system,ui-sans-serif,sans-serif;` +
+            `padding:5px 10px 5px 8px;border-radius:20px;white-space:nowrap;` +
+            `box-shadow:0 2px 8px rgba(0,0,0,0.35);` +
+            `transition:left 0.35s cubic-bezier(0.25,0.46,0.45,0.94),` +
+                       `top 0.35s cubic-bezier(0.25,0.46,0.45,0.94),opacity 0.15s;opacity:0;`;
+          document.body.appendChild(badge);
+        }
+        badge.textContent = `⊡ ${aid}`;
+        badge.style.background = col;
+        const bw = badge.offsetWidth || 90;
+        badge.style.left    = Math.min(x + 14, window.innerWidth - bw - 8) + 'px';
+        badge.style.top     = Math.max(y - 50, 8) + 'px';
+        badge.style.opacity = '1';
+      }, [args.x, args.y, agentId, color]);
 
       session.agents.set(agentId, {
         agentId, ref: null, label: null,
