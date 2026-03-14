@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Phantom Cursor — Demo</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;700;800&display=swap" rel="stylesheet">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg: #07070f; --surface: #0f0f1a; --border: #1a1a2e;
+  --agent1: #7C6FFF; --agent2: #FF6F91; --agent3: #6FFFB0;
+  --text: #d8d6f0; --muted: #4a4a6a;
+  --mono: 'Space Mono', monospace; --display: 'Syne', sans-serif;
+}
+html, body { height: 100%; background: var(--bg); color: var(--text);
+  font-family: var(--mono); font-size: 12px; overflow: hidden; }
+.app { display: grid; grid-template-columns: 320px 1fr;
+  grid-template-rows: 56px 1fr; height: 100vh; }
+.header { grid-column: 1/-1; display: flex; align-items: center; gap: 16px;
+  padding: 0 24px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.logo { display: flex; align-items: center; gap: 10px; }
+.logo-eye { width: 32px; height: 32px; animation: eye-blink 4s ease-in-out infinite; }
+@keyframes eye-blink { 0%,88%,100%{transform:scaleY(1)} 93%{transform:scaleY(0.1)} }
+.logo-title { font-family: var(--display); font-size: 18px; font-weight: 800;
+  color: var(--agent1); letter-spacing: -0.03em; }
+.logo-sub { font-size: 9px; color: var(--muted); letter-spacing: 0.15em; text-transform: uppercase; }
+.header-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+.badge { padding: 3px 8px; border-radius: 3px; font-size: 9px; font-weight: 700;
+  letter-spacing: 0.1em; text-transform: uppercase; }
+.badge-proto { background: #1a1030; color: var(--agent1); border: 1px solid #7C6FFF44; }
+.badge-live { background: #0f2010; color: var(--agent3); border: 1px solid #6FFFB044; }
+.panel { border-right: 1px solid var(--border); background: var(--surface);
+  display: flex; flex-direction: column; overflow-y: auto; }
+.panel-section { padding: 16px; border-bottom: 1px solid var(--border); }
+.section-label { font-size: 9px; letter-spacing: 0.15em; text-transform: uppercase;
+  color: var(--muted); margin-bottom: 10px; }
+.agent-list { display: flex; flex-direction: column; gap: 6px; }
+.agent-btn { display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 5px;
+  cursor: pointer; transition: border-color 0.15s; color: var(--text);
+  font-family: var(--mono); font-size: 11px; text-align: left; }
+.agent-btn:hover { border-color: var(--muted); }
+.agent-btn.active { border-color: var(--active-color, var(--agent1)); }
+.agent-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.agent-info { flex: 1; }
+.agent-name { font-weight: 700; }
+.agent-role { font-size: 9px; color: var(--muted); margin-top: 1px; }
+</style>
+<style>
+.cmd-list { display: flex; flex-direction: column; gap: 5px; }
+.cmd-btn { display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+  cursor: pointer; color: var(--text); font-family: var(--mono); font-size: 10px;
+  text-align: left; transition: border-color 0.12s; }
+.cmd-btn:hover { border-color: var(--muted); }
+.cmd-btn:active { transform: scale(0.98); }
+.cmd-icon { font-size: 13px; width: 20px; text-align: center; }
+.cmd-name { flex: 1; }
+.cmd-key { color: var(--muted); font-size: 9px; }
+.log { flex: 1; padding: 12px; overflow-y: auto; font-size: 10px; line-height: 1.7; }
+.log-entry { display: flex; gap: 8px; padding: 3px 0;
+  border-bottom: 1px solid #0a0a14; animation: log-in 0.2s ease; }
+@keyframes log-in { from{opacity:0;transform:translateX(-4px)} to{opacity:1;transform:translateX(0)} }
+.log-time { color: var(--muted); flex-shrink: 0; }
+.log-agent { font-weight: 700; flex-shrink: 0; }
+.log-ok { color: var(--agent3); }
+.browser-area { display: flex; flex-direction: column; position: relative; overflow: hidden; }
+.browser-chrome { height: 42px; background: #0d0d1a; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 10px; padding: 0 14px; flex-shrink: 0; }
+.browser-dots { display: flex; gap: 5px; }
+.dot { width: 10px; height: 10px; border-radius: 50%; }
+.dot-r { background: #ff5f57; } .dot-y { background: #ffbd2e; } .dot-g { background: #28c840; }
+.url-bar { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  padding: 5px 10px; font-family: var(--mono); font-size: 10px; color: var(--muted); }
+.page-content { flex: 1; overflow: auto; position: relative; background: #f8f8fc; color: #1a1a2e; }
+.mock-page { max-width: 700px; margin: 0 auto; padding: 32px 24px; font-family: Georgia,serif; font-size: 14px; }
+.mock-nav { display: flex; gap: 20px; padding-bottom: 16px; border-bottom: 1px solid #e0e0ec; margin-bottom: 24px; }
+.mock-nav a { color: #4a4a8a; text-decoration: none; font-family: Arial,sans-serif;
+  font-size: 13px; font-weight: 600; padding: 4px 8px; border-radius: 4px; }
+.mock-nav a:hover { background: #eeeef8; }
+.mock-hero { margin-bottom: 28px; }
+.mock-hero h1 { font-size: 28px; color: #1a1a3e; margin-bottom: 10px; line-height: 1.3; }
+.mock-hero p { color: #5a5a7a; line-height: 1.7; margin-bottom: 16px; }
+.mock-cta { display: flex; gap: 10px; }
+.btn-primary { padding: 10px 20px; background: #4a4aff; color: white; border: none;
+  border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; font-family: Arial,sans-serif; }
+.btn-secondary { padding: 10px 20px; background: transparent; color: #4a4aff;
+  border: 1px solid #4a4aff; border-radius: 6px; font-size: 13px; cursor: pointer; font-family: Arial,sans-serif; }
+.mock-form { background: white; border: 1px solid #e0e0ec; border-radius: 10px;
+  padding: 20px; margin-bottom: 24px; }
+.mock-form h3 { font-size: 16px; color: #1a1a3e; margin-bottom: 14px; font-family: Arial,sans-serif; }
+.form-row { display: flex; gap: 10px; margin-bottom: 10px; }
+.form-row input, .form-row select { flex: 1; padding: 8px 10px; border: 1px solid #d0d0e8;
+  border-radius: 5px; font-family: Arial,sans-serif; font-size: 12px; }
+.mock-cards { display: grid; grid-template-columns: repeat(3,1fr); gap: 14px; }
+.mock-card { background: white; border: 1px solid #e0e0ec; border-radius: 8px; padding: 16px; }
+.card-tag { font-size: 9px; text-transform: uppercase; letter-spacing: 0.1em;
+  color: #4a4aff; margin-bottom: 6px; font-family: Arial,sans-serif; }
+.card-title { font-size: 13px; color: #1a1a3e; font-family: Arial,sans-serif; font-weight: 700; margin-bottom: 6px; }
+.card-body { font-size: 11px; color: #5a5a7a; line-height: 1.6; font-family: Arial,sans-serif; }
+</style>
+<style>
+.phantom-cursors { position: absolute; inset: 0; pointer-events: none; z-index: 100; }
+.phantom-cursor-el { position: absolute; pointer-events: none;
+  transition: left 0.22s cubic-bezier(0.25,0.46,0.45,0.94), top 0.22s cubic-bezier(0.25,0.46,0.45,0.94), opacity 0.2s ease;
+  opacity: 0; display: flex; flex-direction: column; align-items: center; gap: 3px;
+  filter: drop-shadow(0 2px 8px rgba(0,0,0,0.35)); }
+.phantom-cursor-el.visible { opacity: 1; }
+.phantom-action-el { position: absolute; pointer-events: none;
+  transition: left 0.08s ease-out, top 0.08s ease-out, opacity 0.15s ease; opacity: 0;
+  filter: drop-shadow(0 1px 4px rgba(0,0,0,0.4)); }
+.phantom-action-el.click-flash { animation: cursor-pop 0.35s ease-out; }
+@keyframes cursor-pop { 0%{transform:scale(1)} 35%{transform:scale(1.4)} 100%{transform:scale(1)} }
+.phantom-ring-el { position: absolute; pointer-events: none; border-radius: 6px;
+  border-width: 2px; border-style: solid; opacity: 0;
+  transition: all 0.18s cubic-bezier(0.34,1.56,0.64,1), opacity 0.2s ease; }
+.phantom-ring-el.ring-visible { opacity: 1; animation: ring-pulse 0.6s ease-out; }
+@keyframes ring-pulse { 0%{box-shadow:0 0 0 0px currentColor} 50%{box-shadow:0 0 0 6px transparent} 100%{box-shadow:0 0 0 0px transparent} }
+.agent-label-tag { font-family: var(--mono); font-size: 8px; font-weight: 700; color: white;
+  padding: 1px 5px; border-radius: 3px; white-space: nowrap; letter-spacing: 0.05em; }
+.snapshot-overlay { position: absolute; inset: 0; background: rgba(7,7,15,0.93); z-index: 200;
+  display: flex; flex-direction: column; padding: 20px; opacity: 0; pointer-events: none;
+  transition: opacity 0.2s ease; font-family: var(--mono); font-size: 10px; }
+.snapshot-overlay.visible { opacity: 1; pointer-events: all; }
+.snapshot-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+.snapshot-title { font-family: var(--display); font-size: 14px; font-weight: 800; color: var(--agent1); }
+.snapshot-close { background: none; border: 1px solid var(--border); color: var(--muted);
+  padding: 4px 10px; border-radius: 4px; cursor: pointer; font-family: var(--mono); font-size: 10px; }
+.snapshot-grid { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; }
+.snapshot-row { display: grid; grid-template-columns: 60px 70px 1fr 120px; gap: 10px;
+  padding: 5px 8px; border: 1px solid var(--border); border-radius: 4px;
+  background: var(--surface); cursor: pointer; animation: snap-in 0.15s ease backwards; }
+.snapshot-row:hover { background: #12121f; }
+@keyframes snap-in { from{opacity:0;transform:translateY(3px)} to{opacity:1;transform:translateY(0)} }
+.snap-ref { color: var(--agent1); font-weight: 700; }
+.snap-tag { color: var(--agent2); }
+.snap-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.snap-rect { color: var(--muted); text-align: right; }
+.snapshot-footer { margin-top: 10px; color: var(--muted); font-size: 9px; display: flex; justify-content: space-between; }
+.token-badge { color: var(--agent3); font-weight: 700; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="logo">
+      <svg class="logo-eye" viewBox="0 0 32 32" fill="none">
+        <ellipse cx="16" cy="16" rx="13" ry="8" stroke="#7C6FFF" stroke-width="2"/>
+        <circle cx="16" cy="16" r="4.5" fill="#7C6FFF"/>
+        <circle cx="16" cy="16" r="2" fill="white" opacity="0.9"/>
+      </svg>
+      <div><div class="logo-title">Phantom Cursor</div><div class="logo-sub">Claude Agent Vision Layer</div></div>
+    </div>
+    <div class="header-right">
+      <span class="badge badge-proto">Prototype v0.1</span>
+      <span class="badge badge-live">● Demo Active</span>
+    </div>
+  </header>
+  <aside class="panel">
+    <div class="panel-section">
+      <div class="section-label">Active Agents</div>
+      <div class="agent-list">
+        <button class="agent-btn active" data-agent="agent-1" style="--active-color:#7C6FFF" onclick="selectAgent('agent-1',this)">
+          <div class="agent-dot" style="background:#7C6FFF"></div>
+          <div class="agent-info"><div class="agent-name">Agent 1 — Reader</div><div class="agent-role">Attention / DOM scan</div></div>
+        </button>
+        <button class="agent-btn" data-agent="agent-2" style="--active-color:#FF6F91" onclick="selectAgent('agent-2',this)">
+          <div class="agent-dot" style="background:#FF6F91"></div>
+          <div class="agent-info"><div class="agent-name">Agent 2 — Actor</div><div class="agent-role">Click / interact</div></div>
+        </button>
+      </div>
+    </div>
+    <div class="panel-section">
+      <div class="section-label">Commands</div>
+      <div class="cmd-list">
+        <button class="cmd-btn" onclick="runSnapshot()"><span class="cmd-icon">◈</span><span class="cmd-name">phantom_snapshot()</span><span class="cmd-key">⌘S</span></button>
+        <button class="cmd-btn" onclick="focusEl('h1')"><span class="cmd-icon">◎</span><span class="cmd-name">focus heading</span><span class="cmd-key">1</span></button>
+        <button class="cmd-btn" onclick="focusEl('.btn-primary')"><span class="cmd-icon">◎</span><span class="cmd-name">focus CTA button</span><span class="cmd-key">2</span></button>
+        <button class="cmd-btn" onclick="focusEl('input')"><span class="cmd-icon">◎</span><span class="cmd-name">focus input</span><span class="cmd-key">3</span></button>
+        <button class="cmd-btn" onclick="clickEl('.btn-primary')"><span class="cmd-icon">▶</span><span class="cmd-name">phantom_click(CTA)</span><span class="cmd-key">C</span></button>
+        <button class="cmd-btn" onclick="parallelAgents()"><span class="cmd-icon">⫸</span><span class="cmd-name">parallel agents demo</span><span class="cmd-key">P</span></button>
+        <button class="cmd-btn" onclick="clearAll()"><span class="cmd-icon">✕</span><span class="cmd-name">clear all cursors</span><span class="cmd-key">ESC</span></button>
+      </div>
+    </div>
+    <div class="log" id="log">
+      <div class="log-entry"><span class="log-time">00s</span><span class="log-agent" style="color:#7C6FFF">SYS</span><span class="log-msg">Phantom Cursor ready. Try the commands ↑</span></div>
+    </div>
+  </aside>
+  <div class="browser-area">
+    <div class="browser-chrome">
+      <div class="browser-dots"><div class="dot dot-r"></div><div class="dot dot-y"></div><div class="dot dot-g"></div></div>
+      <div class="url-bar">🔒 healthanalytics.example.com/dashboard</div>
+    </div>
+    <div class="page-content" id="page-content">
+      <div class="mock-page">
+        <nav class="mock-nav">
+          <a href="#">Dashboard</a><a href="#">Campaigns</a><a href="#">Analytics</a><a href="#">Reports</a><a href="#">Settings</a>
+        </nav>
+        <div class="mock-hero">
+          <h1>Healthcare Campaign Intelligence</h1>
+          <p>Monitor NPI-level reach, audience segments, and conversion signals across your programmatic campaigns. Powered by PulsePoint data infrastructure.</p>
+          <div class="mock-cta"><button class="btn-primary">Launch Campaign</button><button class="btn-secondary">View Analytics</button></div>
+        </div>
+        <div class="mock-form">
+          <h3>Quick Segment Builder</h3>
+          <div class="form-row"><input type="text" placeholder="Campaign name" id="campaign-name"/><select id="specialty"><option>Cardiology</option><option>Oncology</option><option>Neurology</option></select></div>
+          <div class="form-row"><input type="text" placeholder="Geographic region"/><input type="number" placeholder="Target impressions"/></div>
+        </div>
+        <div class="mock-cards">
+          <div class="mock-card"><div class="card-tag">Reach</div><div class="card-title">2.4M HCPs</div><div class="card-body">Verified NPI database across 52 specialties.</div></div>
+          <div class="mock-card"><div class="card-tag">Performance</div><div class="card-title">3.2× ROAS</div><div class="card-body">Average return on ad spend across pharma Q1 2026.</div></div>
+          <div class="mock-card"><div class="card-tag">Compliance</div><div class="card-title">HIPAA Ready</div><div class="card-body">Privacy-safe audience matching with full audit trail.</div></div>
+        </div>
+      </div>
+      <div class="phantom-cursors" id="phantom-layer"></div>
+      <div class="snapshot-overlay" id="snapshot-overlay">
+        <div class="snapshot-header">
+          <div class="snapshot-title">◈ DOM Snapshot — Interactive Elements</div>
+          <button class="snapshot-close" onclick="closeSnapshot()">✕ Close</button>
+        </div>
+        <div class="snapshot-grid" id="snapshot-grid"></div>
+        <div class="snapshot-footer"><span id="snap-count">0 elements</span><span>vs screenshot: <span class="token-badge">~97% token reduction</span></span></div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+const AGENTS = {
+  'agent-1': { color: '#7C6FFF', label: 'Agent 1', cursor: null, action: null, ring: null },
+  'agent-2': { color: '#FF6F91', label: 'Agent 2', cursor: null, action: null, ring: null },
+};
+let activeAgent = 'agent-1';
+const t0 = Date.now();
+
+function log(agentId, msg, cls = '') {
+  const el = document.getElementById('log');
+  const t = Math.floor((Date.now()-t0)/1000).toString().padStart(2,'0');
+  const a = AGENTS[agentId] || { color: '#aaa', label: agentId };
+  const e = document.createElement('div'); e.className = 'log-entry';
+  e.innerHTML = `<span class="log-time">${t}s</span><span class="log-agent" style="color:${a.color}">${a.label}</span><span class="log-msg ${cls}">${msg}</span>`;
+  el.appendChild(e); el.scrollTop = el.scrollHeight;
+}
+
+function getOrCreateCursors(agentId) {
+  const a = AGENTS[agentId]; if (a.cursor) return a;
+  const layer = document.getElementById('phantom-layer');
+  const col = a.color;
+  const cur = document.createElement('div'); cur.className = 'phantom-cursor-el';
+  cur.innerHTML = `<svg width="26" height="26" viewBox="0 0 24 24" fill="none"><ellipse cx="12" cy="12" rx="10" ry="6" stroke="${col}" stroke-width="2"/><circle cx="12" cy="12" r="3.5" fill="${col}"/><circle cx="12" cy="12" r="1.4" fill="white" opacity="0.95"/></svg><span class="agent-label-tag" style="background:${col}">${a.label}</span>`;
+  layer.appendChild(cur); a.cursor = cur;
+  const act = document.createElement('div'); act.className = 'phantom-action-el';
+  act.innerHTML = `<svg width="20" height="24" viewBox="0 0 20 24" fill="none"><path d="M2 2L2 18L6.5 13.5L9.5 20L12 19L9 12.5L15 12.5L2 2Z" fill="${col}" stroke="white" stroke-width="1.5" stroke-linejoin="round"/></svg>`;
+  layer.appendChild(act); a.action = act;
+  const ring = document.createElement('div'); ring.className = 'phantom-ring-el';
+  ring.style.borderColor = col; ring.style.background = col+'18';
+  ring.style.boxShadow = `0 0 12px ${col}88`; layer.appendChild(ring); a.ring = ring;
+  return a;
+}
+
+function moveCursorTo(agentId, x, y) {
+  const a = getOrCreateCursors(agentId);
+  a.cursor.style.left=(x-13)+'px'; a.cursor.style.top=(y-13)+'px'; a.cursor.classList.add('visible');
+}
+
+function highlightEl(agentId, el) {
+  const a = getOrCreateCursors(agentId);
+  const pc = document.getElementById('page-content');
+  const cr = pc.getBoundingClientRect(); const er = el.getBoundingClientRect();
+  const x = er.left-cr.left+pc.scrollLeft, y = er.top-cr.top+pc.scrollTop;
+  moveCursorTo(agentId, x+er.width/2, y+er.height/2);
+  const ring = a.ring;
+  ring.style.left=(x-6)+'px'; ring.style.top=(y-6)+'px';
+  ring.style.width=(er.width+12)+'px'; ring.style.height=(er.height+12)+'px';
+  ring.classList.remove('ring-visible'); requestAnimationFrame(()=>ring.classList.add('ring-visible'));
+}
+
+function animateClick(agentId, el) {
+  const a = getOrCreateCursors(agentId);
+  const pc = document.getElementById('page-content');
+  const cr = pc.getBoundingClientRect(); const er = el.getBoundingClientRect();
+  a.action.style.left=(er.left-cr.left+el.offsetWidth/2-4)+'px';
+  a.action.style.top=(er.top-cr.top+el.offsetHeight/2-2)+'px';
+  a.action.style.opacity='1'; a.action.classList.remove('click-flash');
+  requestAnimationFrame(()=>a.action.classList.add('click-flash'));
+  setTimeout(()=>{a.action.style.opacity='0';},700);
+}
+
+function selectAgent(id, btn) {
+  activeAgent = id;
+  document.querySelectorAll('.agent-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active'); log(id, 'selected as active agent');
+}
+
+function focusEl(selector) {
+  const el = document.getElementById('page-content').querySelector(selector);
+  if (!el) { log(activeAgent, `not found: ${selector}`, 'log-err'); return; }
+  highlightEl(activeAgent, el);
+  log(activeAgent, `phantom_focus("${selector}") → ${el.tagName.toLowerCase()}`, 'log-ok');
+}
+
+function clickEl(selector) {
+  const el = document.getElementById('page-content').querySelector(selector);
+  if (!el) return;
+  highlightEl('agent-1', el); log('agent-1', `focusing ${selector}`);
+  setTimeout(()=>{ animateClick('agent-2', el); log('agent-2', `phantom_click("${selector}") → fired`, 'log-ok'); }, 250);
+}
+
+function clearAll() {
+  Object.values(AGENTS).forEach(a=>{
+    if(a.cursor) a.cursor.classList.remove('visible');
+    if(a.action) a.action.style.opacity='0';
+    if(a.ring) a.ring.classList.remove('ring-visible');
+  }); log(activeAgent,'all cursors cleared');
+}
+
+function parallelAgents() {
+  const pc = document.getElementById('page-content');
+  const form = pc.querySelector('.mock-form'); const cta = pc.querySelector('.btn-primary');
+  if(form){highlightEl('agent-1',form);log('agent-1','scanning form structure','log-ok');}
+  setTimeout(()=>{ if(cta){highlightEl('agent-2',cta);log('agent-2','targeting CTA','log-ok');} },300);
+  setTimeout(()=>{ if(cta){animateClick('agent-2',cta);log('agent-2','phantom_click — dual-agent complete','log-ok');} },900);
+}
+
+function runSnapshot() {
+  const pc = document.getElementById('page-content'); const elements = []; let idx = 1;
+  const tags = new Set(['A','BUTTON','INPUT','SELECT','TEXTAREA']);
+  pc.querySelectorAll('*').forEach(el=>{
+    if(tags.has(el.tagName)){
+      const r=el.getBoundingClientRect();
+      if(r.width>0&&r.height>0) elements.push({ref:'@e'+idx++,tag:el.tagName.toLowerCase(),
+        label:(el.getAttribute('aria-label')||el.getAttribute('placeholder')||el.textContent?.trim().slice(0,40)||el.tagName.toLowerCase()),
+        rect:`(${Math.round(r.x)},${Math.round(r.y)}) ${Math.round(r.width)}×${Math.round(r.height)}`,el});
+    }
+  });
+  const grid = document.getElementById('snapshot-grid'); grid.innerHTML='';
+  elements.forEach((e,i)=>{
+    const row=document.createElement('div'); row.className='snapshot-row'; row.style.animationDelay=(i*0.03)+'s';
+    row.innerHTML=`<span class="snap-ref">${e.ref}</span><span class="snap-tag">[${e.tag}]</span><span class="snap-label">"${e.label}"</span><span class="snap-rect">${e.rect}</span>`;
+    row.addEventListener('click',()=>{closeSnapshot();highlightEl(activeAgent,e.el);log(activeAgent,`focused ${e.ref} "${e.label.slice(0,30)}"`, 'log-ok');});
+    grid.appendChild(row);
+  });
+  document.getElementById('snap-count').textContent=`${elements.length} elements`;
+  document.getElementById('snapshot-overlay').classList.add('visible');
+  log(activeAgent,`phantom_snapshot() → ${elements.length} elements (~${elements.length*40} tokens vs ~40k screenshot)`,'log-ok');
+}
+
+function closeSnapshot() { document.getElementById('snapshot-overlay').classList.remove('visible'); }
+
+document.addEventListener('keydown', e=>{
+  if(e.target.tagName==='INPUT') return;
+  const k=e.key.toLowerCase();
+  if(k==='s'&&(e.metaKey||e.ctrlKey)){e.preventDefault();runSnapshot();}
+  else if(k==='1') focusEl('h1');
+  else if(k==='2') focusEl('.btn-primary');
+  else if(k==='3') focusEl('input');
+  else if(k==='c') clickEl('.btn-primary');
+  else if(k==='p') parallelAgents();
+  else if(k==='escape') clearAll();
+});
+</script>
+</body>
+</html>

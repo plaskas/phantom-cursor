@@ -1,0 +1,80 @@
+/* ── Phantom Cursor Overlay Styles ── */
+
+.phantom-attention-cursor,
+.phantom-action-cursor {
+  position: fixed;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  z-index: 2147483646;
+  will-change: transform;
+  transition: opacity 0.2s ease;
+  opacity: 0;
+}
+
+.phantom-attention-cursor {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  filter: drop-shadow(0 2px 8px rgba(0,0,0,0.4));
+}
+
+.phantom-attention-cursor svg {
+  animation: phantom-eye-blink 3s ease-in-out infinite;
+}
+
+@keyframes phantom-eye-blink {
+  0%, 90%, 100% { transform: scaleY(1); }
+  95% { transform: scaleY(0.15); }
+}
+
+.phantom-agent-label {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 9px;
+  font-weight: 600;
+  color: white;
+  padding: 1px 5px;
+  border-radius: 3px;
+  white-space: nowrap;
+  letter-spacing: 0.05em;
+  opacity: 0.9;
+}
+
+.phantom-action-cursor {
+  filter: drop-shadow(0 1px 4px rgba(0,0,0,0.5));
+}
+
+.phantom-click-flash svg path {
+  animation: phantom-click-burst 0.35s ease-out forwards;
+}
+
+@keyframes phantom-click-burst {
+  0%   { transform: scale(1);    opacity: 1; }
+  40%  { transform: scale(1.35); opacity: 0.8; }
+  100% { transform: scale(0.9);  opacity: 0.6; }
+}
+
+.phantom-attention-ring {
+  position: absolute;
+  pointer-events: none;
+  z-index: 2147483645;
+  border: 2px solid var(--ring-color, #7C6FFF);
+  background: var(--ring-bg, rgba(124,111,255,0.08));
+  border-radius: 6px;
+  opacity: 0;
+  transition: all 0.15s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.2s ease;
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.15) inset,
+    0 0 12px var(--ring-color, #7C6FFF),
+    0 0 24px var(--ring-bg, rgba(124,111,255,0.2));
+}
+
+.phantom-ring-pulse {
+  animation: phantom-ring-pulse-anim 0.6s ease-out;
+}
+
+@keyframes phantom-ring-pulse-anim {
+  0%   { box-shadow: 0 0 0 0px var(--ring-color), 0 0 12px var(--ring-color); }
+  50%  { box-shadow: 0 0 0 6px transparent, 0 0 20px var(--ring-color); }
+  100% { box-shadow: 0 0 0 0px transparent, 0 0 12px var(--ring-color); }
+}

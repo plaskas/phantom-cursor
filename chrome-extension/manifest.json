@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "Phantom Cursor — Claude Agent Vision",
+  "version": "0.1.0",
+  "description": "Phantom cursor overlay and DOM attention layer for Claude browser agents. Replaces screenshot dependency with structured element targeting.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "debugger",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/content.js"],
+      "css": ["src/overlay.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "src/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "externally_connectable": {
+    "matches": ["<all_urls>"]
+  }
+}

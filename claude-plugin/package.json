@@ -1,0 +1,19 @@
+{
+  "name": "phantom-cursor-mcp",
+  "version": "0.1.0",
+  "description": "Claude Code MCP plugin — phantom cursor overlay and DOM attention layer for browser agents",
+  "type": "module",
+  "main": "server.js",
+  "bin": {
+    "phantom-cursor-mcp": "./server.js"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "keywords": ["claude", "mcp", "browser", "phantom-cursor", "ai-agent", "dom"],
+  "license": "MIT"
+}
