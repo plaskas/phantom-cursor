@@ -78,3 +78,14 @@
   50%  { box-shadow: 0 0 0 6px transparent, 0 0 20px var(--ring-color); }
   100% { box-shadow: 0 0 0 0px transparent, 0 0 12px var(--ring-color); }
 }
+
+/* ── Spotlight overlay ────────────────────────────────────────
+   Created by phantom_focus/phantom_move via server.js pageEval.
+   One element per page. Background gradient animated via rAF. */
+#__phantom_spotlight {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2147483644;
+  background: transparent;
+}
