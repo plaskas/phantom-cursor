@@ -1,15 +1,12 @@
 #!/usr/bin/env node
 // ─────────────────────────────────────────────────────────────
-// PHANTOM CURSOR — Claude Code MCP Server
+// PHANTOM CURSOR v0.3 — Claude Code MCP Server
 //
-// Architecture: phantom-cursor is an MCP server (for Claude) that
-// is also an MCP client of chrome-devtools-mcp. All CDP access
-// goes through chrome-devtools-mcp — one connection, no duplicates.
-//
-// Tools exposed to Claude:
-//   Phantom:  phantom_snapshot, phantom_focus, phantom_click,
-//             phantom_navigate, phantom_element, phantom_move
-//   Proxied:  all chrome-devtools-mcp tools (click, fill, navigate, etc.)
+// Token-efficient browser automation:
+//   - phantom_browse: ONE low-res overview per page (cached)
+//   - phantom_focus / phantom_click: text-only + attention state
+//   - Spotlight overlay: darkened page + animated bright circle
+//   - All tools append --- attention --- block
 // ─────────────────────────────────────────────────────────────
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -17,16 +14,21 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import {
+  createSession,
+  detectNavigationAndReset,
+  populateDomCache,
+  formatAttentionState,
+} from './session.js';
 
 // ── Chrome DevTools MCP Client ─────────────────────────────────
-// Owns the single CDP connection. All JS eval goes through here.
 
 const cdtTransport = new StdioClientTransport({
   command: 'npx',
   args: ['chrome-devtools-mcp@latest'],
 });
 
-const cdtClient = new Client({ name: 'phantom-cursor-cdt', version: '0.1.0' });
+const cdtClient = new Client({ name: 'phantom-cursor-cdt', version: '0.3.0' });
 await cdtClient.connect(cdtTransport);
 
 let cdtTools = [];
@@ -38,6 +40,10 @@ try {
   console.error('[PhantomCursor] Could not list chrome-devtools tools:', e.message);
 }
 
+// ── Session State ──────────────────────────────────────────────
+
+const session = createSession();
+
 // ── Delegation Helpers ─────────────────────────────────────────
 
 async function callCDT(toolName, args = {}) {
@@ -45,8 +51,6 @@ async function callCDT(toolName, args = {}) {
   return result.content?.[0]?.text ?? '';
 }
 
-// Execute JS in the page via chrome-devtools evaluate_script.
-// Returns the parsed JSON result, or raw text if not JSON-wrapped.
 async function pageEval(func, funcArgs = []) {
   const fnBody = `() => { return (${func.toString()})(${funcArgs.map(a => JSON.stringify(a)).join(',')}); }`;
   const text = await callCDT('evaluate_script', { function: fnBody });
@@ -57,25 +61,7 @@ async function pageEval(func, funcArgs = []) {
   return text;
 }
 
-// ── Page State ────────────────────────────────────────────────
-// Tracks per-page context so Claude can reference the overview
-// and stream DOM without re-snapshotting on every interaction.
-
-const pageState = {
-  url: null,
-  overviewTaken: false,   // has the first full-page overview been sent?
-  domCached: false,       // has the DOM snapshot been taken this page?
-};
-
-function resetPageState(url) {
-  pageState.url = url;
-  pageState.overviewTaken = false;
-  pageState.domCached = false;
-}
-
 // ── Smooth Motion Injector ─────────────────────────────────────
-// Auto-injects rAF-based smooth cursor animation on every page.
-// Safe to call multiple times — guards with __phantomSmoothInstalled.
 
 async function ensureSmoothMotion() {
   try {
@@ -96,146 +82,258 @@ async function ensureSmoothMotion() {
         }
         return { animate, isIgnoring: () => ignoring, getCurrent: () => current };
       }
-      function wire(id, readFn, writeFn, keys, duration, debounceMs) {
-        const el = document.getElementById(id); if (!el) return null;
-        el.style.transition = 'none';
-        const anim = makeAnimator(readFn, writeFn, keys, duration);
-        let timer = null;
-        const obs = new MutationObserver(() => {
-          if (anim.isIgnoring()) return;
-          clearTimeout(timer);
-          timer = setTimeout(() => {
-            const target = readFn(); writeFn(anim.getCurrent()); anim.animate(target);
-          }, debounceMs);
-        });
-        obs.observe(el, { attributes: true, attributeFilter: ['style'] });
-        return obs;
-      }
-      const parseXY  = id => { const m = (document.getElementById(id)||{style:{}}).style.transform?.match(/translate\(([0-9.-]+)px,\s*([0-9.-]+)px\)/); return m ? {x:+m[1],y:+m[2]} : {x:0,y:0}; };
-      const writeXY  = id => s => { const el = document.getElementById(id); if(el) el.style.transform=`translate(${s.x}px,${s.y}px)`; };
-      const parseBox = id => { const el = document.getElementById(id); return el ? {left:parseFloat(el.style.left)||0,top:parseFloat(el.style.top)||0,width:parseFloat(el.style.width)||0,height:parseFloat(el.style.height)||0} : {left:0,top:0,width:0,height:0}; };
-      const writeBox = id => s => { const el = document.getElementById(id); if(el){el.style.left=s.left+'px';el.style.top=s.top+'px';el.style.width=s.width+'px';el.style.height=s.height+'px';} };
-      const obs1 = wire('__phantom_cur_default', ()=>parseXY('__phantom_cur_default'), writeXY('__phantom_cur_default'), ['x','y'], 550, 16);
-      const obs2 = wire('__phantom_ring_default', ()=>parseBox('__phantom_ring_default'), writeBox('__phantom_ring_default'), ['left','top','width','height'], 550, 20);
-      const obs3 = wire('__phantom_act_default', ()=>parseXY('__phantom_act_default'), writeXY('__phantom_act_default'), ['x','y'], 400, 16);
-      if (obs1 && obs2 && obs3)
-        window.__phantomSmoothInstalled = { disconnect() { obs1.disconnect(); obs2.disconnect(); obs3.disconnect(); } };
+      window.__phantomSmoothInstalled = true;
     });
-  } catch (_) { /* page may still be loading — will retry on next interaction */ }
+  } catch (_) { /* page may still be loading */ }
 }
 
-// ── Phantom Operations ─────────────────────────────────────────
+// ── DOM Walker ─────────────────────────────────────────────────
 
 async function cdpSnapshot(rootSelector = 'body') {
   return pageEval((root) => {
-    const elements = []; let idx = 1;
-    const iTags = new Set(['A','BUTTON','INPUT','SELECT','TEXTAREA','LABEL']);
-    const iRoles = new Set(['button','link','textbox','combobox','checkbox','radio','menuitem','tab']);
-    const getLabel = el => el.getAttribute('aria-label') || el.getAttribute('placeholder') ||
-      el.getAttribute('title') || el.textContent?.trim().slice(0,80) || el.tagName.toLowerCase();
-    const getSel = el => {
+    const iTags  = new Set(['A','BUTTON','INPUT','SELECT','TEXTAREA','LABEL','FORM']);
+    const iRoles = new Set(['button','link','textbox','combobox','checkbox','radio',
+                            'menuitem','tab','listitem','option']);
+
+    function isVisible(el) {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) return false;
+      const s = window.getComputedStyle(el);
+      return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    }
+
+    function getLabel(el) {
+      return el.getAttribute('aria-label') || el.getAttribute('placeholder') ||
+        el.getAttribute('title') || el.getAttribute('alt') ||
+        el.textContent?.trim().slice(0, 80) || el.getAttribute('name') ||
+        el.tagName.toLowerCase();
+    }
+
+    function getSel(el) {
       if (el.id) return '#' + CSS.escape(el.id);
-      const p = []; let c = el;
-      while (c && c !== document.body && p.length < 4) {
-        let s = c.tagName.toLowerCase();
-        const cls = c.className?.toString?.().trim().split(/\s+/).slice(0,2).join('.');
-        if (cls) s += '.' + cls;
-        p.unshift(s); c = c.parentElement;
+      if (el.getAttribute('data-testid')) return `[data-testid="${el.getAttribute('data-testid')}"]`;
+      const parts = []; let cur = el;
+      while (cur && cur !== document.body && parts.length < 4) {
+        let seg = cur.tagName.toLowerCase();
+        const cls = cur.className?.toString?.().trim().split(/\s+/).slice(0, 2).join('.');
+        if (cls) seg += '.' + cls;
+        parts.unshift(seg); cur = cur.parentElement;
       }
-      return p.join(' > ');
-    };
+      return parts.join(' > ');
+    }
+
+    const elements = []; let idx = 1;
     function walk(node) {
       if (node.nodeType !== 1) return;
       const role = node.getAttribute('role');
-      if (iTags.has(node.tagName) || iRoles.has(role) || node.hasAttribute('onclick')) {
+      if ((iTags.has(node.tagName) || iRoles.has(role) ||
+           node.hasAttribute('onclick') || node.hasAttribute('tabindex')) && isVisible(node)) {
         const r = node.getBoundingClientRect();
-        if (r.width > 0 && r.height > 0)
-          elements.push({ ref: '@e'+idx++, tag: node.tagName.toLowerCase(), role: role||null,
-            label: getLabel(node), selector: getSel(node),
-            rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) } });
+        elements.push({
+          ref: '@e' + idx++, tag: node.tagName.toLowerCase(), role: role || null,
+          label: getLabel(node), selector: getSel(node),
+          type: node.getAttribute('type') || null,
+          value: node.value || null,
+          disabled: node.disabled || node.getAttribute('aria-disabled') === 'true',
+          rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
+        });
       }
       for (const c of node.children) walk(c);
     }
     walk(document.querySelector(root) || document.body);
-    return { url: location.href, title: document.title, elements };
+    return {
+      url: location.href, title: document.title, timestamp: Date.now(),
+      viewport: { w: window.innerWidth, h: window.innerHeight }, elements,
+    };
   }, [rootSelector]);
 }
 
-async function cdpFocusElement(agentId, selector, color = '#7C6FFF') {
-  return pageEval((sel, aid, col) => {
+// ── Agent Color Palette (Figma-style multiplayer) ─────────────
+
+const AGENT_PALETTE = ['#7C6FFF', '#00C9A7', '#FF6B6B', '#FFB830', '#4ECDC4', '#C77DFF'];
+function agentColor(agentId) {
+  let h = 5381;
+  for (let i = 0; i < agentId.length; i++) h = ((h * 33) ^ agentId.charCodeAt(i)) >>> 0;
+  return AGENT_PALETTE[h % AGENT_PALETTE.length];
+}
+
+// ── Spotlight Focus System ─────────────────────────────────────
+// One spotlight overlay that moves to the active agent's element.
+// Each agent keeps a persistent colored name badge at their last position.
+
+async function cdpFocusElement(agentId, selector, action = 'focus') {
+  const color = agentColor(agentId);
+  return pageEval((sel, aid, col, act) => {
     const el = document.querySelector(sel);
     if (!el) return { ok: false, error: 'Element not found' };
     const r = el.getBoundingClientRect();
-    let ring = document.getElementById('__phantom_ring_' + aid);
-    if (!ring) {
-      ring = document.createElement('div');
-      ring.id = '__phantom_ring_' + aid;
-      ring.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483645;border-radius:6px;transition:all 0.15s ease;';
-      document.body.appendChild(ring);
+    const cx = r.left + r.width  / 2;
+    const cy = r.top  + r.height / 2;
+    const radius = Math.max(Math.max(r.width, r.height) / 2 + 60, 80);
+
+    // ── Spotlight overlay (colored tint from agent palette) ──
+    let ov = document.getElementById('__phantom_spotlight');
+    if (!ov) {
+      ov = document.createElement('div');
+      ov.id = '__phantom_spotlight';
+      ov.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483644;';
+      document.body.appendChild(ov);
     }
-    ring.style.left=r.left-6+'px'; ring.style.top=r.top-6+'px';
-    ring.style.width=r.width+12+'px'; ring.style.height=r.height+12+'px';
-    ring.style.border=`2px solid ${col}`; ring.style.background=col+'18';
-    ring.style.boxShadow=`0 0 12px ${col}88`; ring.style.opacity='1';
-    let cur = document.getElementById('__phantom_cur_' + aid);
-    if (!cur) {
-      cur = document.createElement('div');
-      cur.id = '__phantom_cur_' + aid;
-      cur.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483646;transition:transform 0.18s cubic-bezier(0.25,0.46,0.45,0.94);';
-      cur.innerHTML = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none"><ellipse cx="12" cy="12" rx="10" ry="6" stroke="${col}" stroke-width="1.8"/><circle cx="12" cy="12" r="3" fill="${col}"/><circle cx="12" cy="12" r="1.2" fill="white" opacity="0.9"/></svg>`;
-      document.body.appendChild(cur);
+    const hex = col.replace('#', '');
+    const rr = parseInt(hex.slice(0,2),16), gg = parseInt(hex.slice(2,4),16), bb = parseInt(hex.slice(4,6),16);
+    const dark = `rgba(${Math.round(rr*0.12)},${Math.round(gg*0.12)},${Math.round(bb*0.12)},0.82)`;
+
+    const fromX = ov._spotX ?? cx, fromY = ov._spotY ?? cy, fromR = ov._spotR ?? radius;
+    const start = performance.now(), dur = 420;
+    const ease = t => t < 0.5 ? 4*t*t*t : 1-Math.pow(-2*t+2,3)/2;
+    if (ov._raf) cancelAnimationFrame(ov._raf);
+    (function frame(now) {
+      const t  = Math.min((now - start) / dur, 1), e = ease(t);
+      const x  = fromX + (cx - fromX) * e;
+      const y  = fromY + (cy - fromY) * e;
+      const rd = fromR + (radius - fromR) * e;
+      const inner = Math.round(rd * 0.55), outer = Math.round(rd * 1.35);
+      ov.style.background =
+        `radial-gradient(circle ${Math.round(rd)}px at ${Math.round(x)}px ${Math.round(y)}px,` +
+        `transparent 0px,transparent ${inner}px,${dark} ${outer}px,${dark} 100%)`;
+      if (t < 1) ov._raf = requestAnimationFrame(frame);
+      else { ov._spotX = cx; ov._spotY = cy; ov._spotR = radius; ov._raf = null; }
+    })(performance.now());
+
+    // ── Agent label badge (persistent, floats above spotlight) ──
+    const glyph = act === 'click' ? '↑' : act === 'browse' ? '⊡' : '◉';
+    let badge = document.getElementById('__phantom_label_' + aid);
+    if (!badge) {
+      badge = document.createElement('div');
+      badge.id = '__phantom_label_' + aid;
+      badge.style.cssText =
+        `position:fixed;pointer-events:none;z-index:2147483645;` +
+        `color:#fff;font:600 11px/1 -apple-system,ui-sans-serif,sans-serif;` +
+        `padding:5px 10px 5px 8px;border-radius:20px;white-space:nowrap;` +
+        `box-shadow:0 2px 8px rgba(0,0,0,0.35);` +
+        `transition:left 0.42s cubic-bezier(0.25,0.46,0.45,0.94),` +
+                   `top 0.42s cubic-bezier(0.25,0.46,0.45,0.94),opacity 0.15s;` +
+        `opacity:0;`;
+      document.body.appendChild(badge);
     }
-    cur.style.transform = `translate(${r.left+r.width/2-12}px,${r.top+r.height/2-12}px)`;
-    cur.style.opacity = '1';
-    return { ok: true, rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) } };
-  }, [selector, agentId, color]);
+    badge.textContent = `${glyph} ${aid}`;
+    badge.style.background = col;
+    // Position: above and right of spotlight center, clamped to viewport
+    const bw = badge.offsetWidth || 90;
+    const bx = Math.min(Math.round(cx) + 14, window.innerWidth - bw - 8);
+    const by = Math.max(Math.round(cy) - radius - 38, 8);
+    badge.style.left    = bx + 'px';
+    badge.style.top     = by + 'px';
+    badge.style.opacity = '1';
+
+    return {
+      ok: true,
+      rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
+    };
+  }, [selector, agentId, color, action]);
 }
 
-async function cdpClickElement(agentId, selector, color = '#7C6FFF') {
-  const focus = await cdpFocusElement(agentId, selector, color);
+async function cdpClickElement(agentId, selector) {
+  const focus = await cdpFocusElement(agentId, selector, 'click');
   if (!focus?.ok) return focus;
+
+  const color = agentColor(agentId);
   await pageEval((sel, aid, col) => {
     const el = document.querySelector(sel); if (!el) return;
     const r = el.getBoundingClientRect();
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    // Click burst arrow
     let act = document.getElementById('__phantom_act_' + aid);
     if (!act) {
       act = document.createElement('div'); act.id = '__phantom_act_' + aid;
-      act.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483647;transition:transform 0.08s ease;';
-      act.innerHTML = `<svg width="20" height="24" viewBox="0 0 20 24" fill="none"><path d="M2 2L2 18L6.5 13.5L9.5 20L12 19L9 12.5L15 12.5L2 2Z" fill="${col}" stroke="white" stroke-width="1.2" stroke-linejoin="round"/></svg>`;
+      act.style.cssText =
+        'position:fixed;pointer-events:none;z-index:2147483647;' +
+        'transition:transform 0.08s ease,opacity 0.12s ease;opacity:0;';
       document.body.appendChild(act);
     }
-    act.style.transform = `translate(${r.left+r.width/2-4}px,${r.top+r.height/2-2}px)`;
-    act.style.opacity = '1';
-    setTimeout(() => { act.style.opacity = '0'; }, 600);
+    act.innerHTML =
+      `<svg width="20" height="24" viewBox="0 0 20 24" fill="none">` +
+      `<path d="M2 2L2 18L6.5 13.5L9.5 20L12 19L9 12.5L15 12.5L2 2Z"` +
+      ` fill="#fff" stroke="${col}" stroke-width="1.5" stroke-linejoin="round"/></svg>`;
+    act.style.transform = `translate(${cx - 4}px,${cy - 2}px)`;
+    act.style.opacity   = '1';
+    setTimeout(() => { act.style.opacity = '0'; }, 500);
+    // Revert badge glyph from ↑ back to ◉ after click burst
+    setTimeout(() => {
+      const badge = document.getElementById('__phantom_label_' + aid);
+      if (badge) badge.textContent = `◉ ${aid}`;
+    }, 620);
   }, [selector, agentId, color]);
+
   return focus;
+}
+
+// ── Target Resolver ────────────────────────────────────────────
+
+async function resolveTarget(refOrSelector) {
+  if (refOrSelector.startsWith('@')) {
+    const el = session.dom.elementMap.get(refOrSelector);
+    if (el) return { selector: el.selector, ref: el.ref, label: el.label, rect: el.rect, source: 'cache' };
+    return { error: `Ref ${refOrSelector} not in DOM cache. Call phantom_browse to refresh.` };
+  }
+  const detail = await pageEval((sel) => {
+    const el = document.querySelector(sel); if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return {
+      label: el.getAttribute('aria-label') || el.textContent?.trim().slice(0, 80) || sel,
+      rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
+    };
+  }, [refOrSelector]);
+  if (!detail) return { error: `Selector "${refOrSelector}" not found in DOM.` };
+  return { selector: refOrSelector, ref: null, label: detail.label, rect: detail.rect, source: 'live' };
 }
 
 // ── Phantom Tool Definitions ───────────────────────────────────
 
 const PHANTOM_TOOLS = [
   {
-    name: 'phantom_snapshot',
-    description: 'Returns structured list of all interactive elements on the page. Use INSTEAD of screenshots. ~97% token reduction.',
+    name: 'phantom_browse',
+    description:
+      'START HERE on any new page. Returns a low-res full-page overview JPEG + complete DOM listing. ' +
+      'Caches the overview — subsequent calls on the same page serve the cached image. ' +
+      'Pass forceRefresh:true to retake the overview screenshot. ' +
+      'This is the ONLY tool that returns a screenshot.',
     inputSchema: { type: 'object', properties: {
-      rootSelector: { type: 'string', description: 'CSS selector to scope snapshot (default: body)', default: 'body' },
-      agentId: { type: 'string', default: 'default' },
+      rootSelector: { type: 'string', default: 'body' },
+      agentId:      { type: 'string', default: 'default' },
+      forceRefresh: { type: 'boolean', default: false },
+    }},
+  },
+  {
+    name: 'phantom_snapshot',
+    description:
+      'Refresh the DOM element list without taking a screenshot. ' +
+      'Use after page content changes (modals, search results, etc.). ' +
+      'Returns DOM listing + attention state (text only).',
+    inputSchema: { type: 'object', properties: {
+      rootSelector: { type: 'string', default: 'body' },
+      agentId:      { type: 'string', default: 'default' },
     }},
   },
   {
     name: 'phantom_focus',
-    description: 'Move attention (eye) cursor to element. Shows user what Claude is looking at.',
+    description:
+      'Move spotlight to element — shows what Claude is looking at by darkening the page except a bright circle around the element. ' +
+      'Accepts a DOM ref (@e12) from phantom_browse for O(1) cache lookup, or a CSS selector. ' +
+      'Returns TEXT ONLY — element details + attention state. No screenshot taken.',
     inputSchema: { type: 'object', required: ['selector'], properties: {
-      selector: { type: 'string', description: 'CSS selector for target element' },
-      agentId: { type: 'string', default: 'default' },
+      selector: { type: 'string', description: 'DOM ref (@e12) or CSS selector.' },
+      agentId:  { type: 'string', default: 'default' },
     }},
   },
   {
     name: 'phantom_click',
-    description: 'Animate action (arrow) cursor clicking an element. Call alongside actual click for visual feedback.',
+    description:
+      'Animate spotlight + click burst on element. Accepts DOM ref (@e12) or CSS selector. ' +
+      'Returns text confirmation + attention state. No screenshot.',
     inputSchema: { type: 'object', required: ['selector'], properties: {
       selector: { type: 'string' },
-      agentId: { type: 'string', default: 'default' },
+      agentId:  { type: 'string', default: 'default' },
     }},
   },
   {
@@ -247,24 +345,16 @@ const PHANTOM_TOOLS = [
   },
   {
     name: 'phantom_navigate',
-    description: 'Navigate the current browser tab to a URL.',
+    description: 'Navigate the current browser tab to a URL. Resets all session caches.',
     inputSchema: { type: 'object', required: ['url'], properties: {
       url: { type: 'string' },
     }},
   },
   {
     name: 'phantom_move',
-    description: 'Move attention cursor to specific x,y coordinates.',
+    description: 'Move spotlight to specific x,y coordinates. Returns attention state.',
     inputSchema: { type: 'object', required: ['x', 'y'], properties: {
       x: { type: 'number' }, y: { type: 'number' },
-      agentId: { type: 'string', default: 'default' },
-    }},
-  },
-  {
-    name: 'phantom_browse',
-    description: 'START HERE on any new page. Returns a low-res full-page overview screenshot + complete DOM snapshot in one call. Cache both — use the overview as your spatial map, then stream through DOM elements with phantom_focus without re-snapshotting.',
-    inputSchema: { type: 'object', properties: {
-      rootSelector: { type: 'string', default: 'body' },
       agentId: { type: 'string', default: 'default' },
     }},
   },
@@ -273,7 +363,7 @@ const PHANTOM_TOOLS = [
 // ── MCP Server ─────────────────────────────────────────────────
 
 const server = new Server(
-  { name: 'phantom-cursor', version: '0.2.0' },
+  { name: 'phantom-cursor', version: '0.3.0' },
   { capabilities: { tools: {} } }
 );
 
@@ -284,126 +374,238 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
   try {
-    // ── Phantom tools ──
-    if (name === 'phantom_snapshot') {
+
+    // ── phantom_browse ─────────────────────────────────────────
+    if (name === 'phantom_browse') {
+      await ensureSmoothMotion();
+
       const snap = await cdpSnapshot(args.rootSelector || 'body');
-      const summary = snap.elements.map(e =>
-        `${e.ref} [${e.tag}${e.role ? ':'+e.role : ''}] "${e.label}" @ (${e.rect.x},${e.rect.y})`
-      ).join('\n');
-      return { content: [{ type: 'text', text:
-        `Page: ${snap.title}\nURL: ${snap.url}\nElements (${snap.elements.length}):\n\n${summary}` }] };
+      detectNavigationAndReset(session, snap.url, snap.title);
+      populateDomCache(session, snap);
+
+      let imageNote;
+      if (!session.overview.imageContent || args.forceRefresh) {
+        const shot = await cdtClient.callTool({
+          name: 'take_screenshot',
+          arguments: { fullPage: true, format: 'jpeg', quality: 15 },
+        });
+        session.overview.imageContent = (shot.content || []).find(c => c.type === 'image') ?? null;
+        session.overview.capturedAt = Date.now();
+        imageNote = 'Overview: fresh';
+      } else {
+        const ageSec = Math.round((Date.now() - session.overview.capturedAt) / 1000);
+        imageNote = `Overview: cached (${ageSec}s ago) — pass forceRefresh:true to recapture`;
+      }
+
+      const agentId = args.agentId || 'default';
+      session.agents.set(agentId, {
+        agentId, ref: null, label: 'page', x: 0, y: 0, action: 'browse', updatedAt: Date.now(),
+      });
+
+      const domLines = snap.elements.map(e => {
+        const type     = e.type     ? ':' + e.type  : '';
+        const role     = e.role     ? ':' + e.role  : '';
+        const disabled = e.disabled ? ' [disabled]' : '';
+        const val      = e.value    ? ` ="${e.value}"` : '';
+        return `${e.ref} [${e.tag}${type}${role}]${disabled} "${e.label}"${val} @ (${e.rect.x},${e.rect.y}) ${e.rect.w}x${e.rect.h}`;
+      }).join('\n');
+
+      const text = [
+        `Page: ${snap.title}`,
+        `URL: ${snap.url}`,
+        `Viewport: ${snap.viewport.w}x${snap.viewport.h}`,
+        imageNote,
+        `DOM: ${snap.elements.length} interactive elements`,
+        '',
+        domLines,
+        formatAttentionState(session),
+      ].join('\n');
+
+      return {
+        content: [
+          { type: 'text', text },
+          ...(session.overview.imageContent ? [session.overview.imageContent] : []),
+        ],
+      };
     }
 
+    // ── phantom_snapshot ───────────────────────────────────────
+    if (name === 'phantom_snapshot') {
+      const snap = await cdpSnapshot(args.rootSelector || 'body');
+      populateDomCache(session, snap);
+
+      const domLines = snap.elements.map(e =>
+        `${e.ref} [${e.tag}${e.role ? ':' + e.role : ''}] "${e.label}" @ (${e.rect.x},${e.rect.y}) ${e.rect.w}x${e.rect.h}`
+      ).join('\n');
+
+      const text = [
+        `DOM refreshed: ${snap.elements.length} elements`,
+        `Page: ${snap.title}  URL: ${snap.url}`,
+        '',
+        domLines,
+        formatAttentionState(session),
+      ].join('\n');
+
+      return { content: [{ type: 'text', text }] };
+    }
+
+    // ── phantom_focus ──────────────────────────────────────────
     if (name === 'phantom_focus') {
       await ensureSmoothMotion();
-      const res = await cdpFocusElement(args.agentId || 'default', args.selector);
-      if (!res?.ok) return { content: [{ type: 'text', text: `Could not focus: ${args.selector}` }] };
+      const agentId = args.agentId || 'default';
 
-      // Scroll element into view so the vicinity screenshot is centred on it
+      const target = await resolveTarget(args.selector);
+      if (target.error) return { content: [{ type: 'text', text: target.error }] };
+
       await pageEval((sel) => {
         const el = document.querySelector(sel);
         if (el) el.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
-      }, [args.selector]);
+      }, [target.selector]);
 
-      // Small pause for smooth-motion animation to reach the element
-      await new Promise(r => setTimeout(r, 300));
+      const res = await cdpFocusElement(agentId, target.selector);
+      if (!res?.ok) return { content: [{ type: 'text', text: `Could not focus: ${target.selector}` }] };
 
-      // Vicinity screenshot — viewport is now centred on the element
-      const shot = await cdtClient.callTool({
-        name: 'take_screenshot',
-        arguments: { format: 'jpeg', quality: 80 },
+      const cx = target.rect.x + Math.round(target.rect.w / 2);
+      const cy = target.rect.y + Math.round(target.rect.h / 2);
+      session.agents.set(agentId, {
+        agentId, ref: target.ref, label: target.label,
+        x: cx, y: cy, action: 'focus', updatedAt: Date.now(),
       });
 
-      return { content: [
-        { type: 'text', text: `Focused ${args.selector} at (${res.rect.x},${res.rect.y}) ${res.rect.w}×${res.rect.h}` },
-        ...(shot.content || []),
-      ]};
+      const text = [
+        `Focused: ${target.ref ?? target.selector}`,
+        `  label:  "${target.label}"`,
+        `  rect:   (${target.rect.x}, ${target.rect.y}) ${target.rect.w}x${target.rect.h}`,
+        `  center: (${cx}, ${cy})`,
+        `  source: ${target.source}`,
+        formatAttentionState(session),
+      ].join('\n');
+
+      return { content: [{ type: 'text', text }] };
     }
 
+    // ── phantom_click ──────────────────────────────────────────
     if (name === 'phantom_click') {
-      const res = await cdpClickElement(args.agentId || 'default', args.selector);
-      return { content: [{ type: 'text', text: res?.ok
-        ? `Action cursor animated click on ${args.selector}`
-        : `Could not click: ${args.selector}` }] };
+      const agentId = args.agentId || 'default';
+
+      const target = await resolveTarget(args.selector);
+      if (target.error) return { content: [{ type: 'text', text: target.error }] };
+
+      const res = await cdpClickElement(agentId, target.selector);
+      if (!res?.ok) return { content: [{ type: 'text', text: `Could not click: ${target.selector}` }] };
+
+      const cx = target.rect.x + Math.round(target.rect.w / 2);
+      const cy = target.rect.y + Math.round(target.rect.h / 2);
+      session.agents.set(agentId, {
+        agentId, ref: target.ref, label: target.label,
+        x: cx, y: cy, action: 'click', updatedAt: Date.now(),
+      });
+
+      const text = [
+        `Clicked: ${target.ref ?? target.selector} "${target.label}"`,
+        `  at: (${cx}, ${cy})`,
+        formatAttentionState(session),
+      ].join('\n');
+
+      return { content: [{ type: 'text', text }] };
     }
 
+    // ── phantom_element ────────────────────────────────────────
     if (name === 'phantom_element') {
       const detail = await pageEval((sel) => {
         const el = document.querySelector(sel); if (!el) return null;
         const r = el.getBoundingClientRect();
-        return { tag: el.tagName.toLowerCase(),
-          label: el.getAttribute('aria-label') || el.textContent?.trim().slice(0,200),
-          value: el.value || el.innerText?.slice(0,500),
+        return {
+          tag: el.tagName.toLowerCase(),
+          label: el.getAttribute('aria-label') || el.textContent?.trim().slice(0, 200),
+          value: el.value || el.innerText?.slice(0, 500),
           rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
-          attributes: Object.fromEntries(Array.from(el.attributes).map(a => [a.name, a.value])) };
+          attributes: Object.fromEntries(Array.from(el.attributes).map(a => [a.name, a.value])),
+        };
       }, [args.selector]);
       return { content: [{ type: 'text', text: detail
         ? JSON.stringify(detail, null, 2)
         : `Element not found: ${args.selector}` }] };
     }
 
+    // ── phantom_navigate ───────────────────────────────────────
     if (name === 'phantom_navigate') {
+      await pageEval(() => {
+        document.getElementById('__phantom_spotlight')?.remove();
+        document.querySelectorAll('[id^="__phantom_label_"]').forEach(el => el.remove());
+        document.querySelectorAll('[id^="__phantom_act_"]').forEach(el => el.remove());
+      }).catch(() => {});
+
       await callCDT('navigate_page', { type: 'url', url: args.url });
-      resetPageState(args.url);
-      // Give the page a moment to settle then inject smooth motion
+      Object.assign(session, createSession());
+      session.url = args.url;
       await new Promise(r => setTimeout(r, 800));
       await ensureSmoothMotion();
-      return { content: [{ type: 'text', text: `Navigated to ${args.url}` }] };
+      return { content: [{ type: 'text', text: `Navigated to ${args.url}\nCall phantom_browse to cache the new page.` }] };
     }
 
-    if (name === 'phantom_browse') {
-      await ensureSmoothMotion();
-
-      // 1. Full-page low-res overview
-      const overviewShot = await cdtClient.callTool({
-        name: 'take_screenshot',
-        arguments: { fullPage: true, format: 'jpeg', quality: 20 },
-      });
-      pageState.overviewTaken = true;
-
-      // 2. DOM snapshot
-      const snap = await cdpSnapshot(args.rootSelector || 'body');
-      pageState.domCached = true;
-      const summary = snap.elements.map(e =>
-        `${e.ref} [${e.tag}${e.role ? ':'+e.role : ''}] "${e.label}" @ (${e.rect.x},${e.rect.y}) ${e.rect.w}×${e.rect.h}`
-      ).join('\n');
-
-      return { content: [
-        { type: 'text', text:
-          `Page: ${snap.title}\nURL: ${snap.url}\n` +
-          `Overview screenshot attached (low-res reference map).\n` +
-          `DOM Elements (${snap.elements.length}) — use these refs for phantom_focus:\n\n${summary}` },
-        ...(overviewShot.content || []),
-      ]};
-    }
-
+    // ── phantom_move ───────────────────────────────────────────
     if (name === 'phantom_move') {
-      await pageEval((x, y, aid) => {
-        const col = '#7C6FFF';
-        let cur = document.getElementById('__phantom_cur_' + aid);
-        if (!cur) {
-          cur = document.createElement('div');
-          cur.id = '__phantom_cur_' + aid;
-          cur.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483646;transition:transform 0.18s cubic-bezier(0.25,0.46,0.45,0.94);';
-          cur.innerHTML = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none"><ellipse cx="12" cy="12" rx="10" ry="6" stroke="${col}" stroke-width="1.8"/><circle cx="12" cy="12" r="3" fill="${col}"/><circle cx="12" cy="12" r="1.2" fill="white" opacity="0.9"/></svg>`;
-          document.body.appendChild(cur);
+      const agentId = args.agentId || 'default';
+      const color = agentColor(agentId);
+      await pageEval((x, y, aid, col) => {
+        // Spotlight
+        let ov = document.getElementById('__phantom_spotlight');
+        if (!ov) {
+          ov = document.createElement('div');
+          ov.id = '__phantom_spotlight';
+          ov.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483644;';
+          document.body.appendChild(ov);
         }
-        cur.style.transform = `translate(${x-12}px,${y-12}px)`; cur.style.opacity = '1';
-      }, [args.x, args.y, args.agentId || 'default']);
-      return { content: [{ type: 'text', text: `Attention cursor moved to (${args.x}, ${args.y})` }] };
-    }
+        const hex = col.replace('#','');
+        const rr = parseInt(hex.slice(0,2),16), gg = parseInt(hex.slice(2,4),16), bb = parseInt(hex.slice(4,6),16);
+        const dark = `rgba(${Math.round(rr*0.12)},${Math.round(gg*0.12)},${Math.round(bb*0.12)},0.82)`;
+        const fromX = ov._spotX ?? x, fromY = ov._spotY ?? y, fromR = ov._spotR ?? 100;
+        const radius = 100;
+        const start = performance.now(), dur = 350;
+        const ease = t => t < 0.5 ? 4*t*t*t : 1-Math.pow(-2*t+2,3)/2;
+        if (ov._raf) cancelAnimationFrame(ov._raf);
+        (function frame(now) {
+          const t = Math.min((now - start) / dur, 1), e = ease(t);
+          const cx = fromX + (x - fromX)*e, cy = fromY + (y - fromY)*e;
+          const rd = fromR + (radius - fromR)*e;
+          ov.style.background =
+            `radial-gradient(circle ${Math.round(rd)}px at ${Math.round(cx)}px ${Math.round(cy)}px,` +
+            `transparent 0px,transparent ${Math.round(rd*0.55)}px,` +
+            `${dark} ${Math.round(rd*1.35)}px,${dark} 100%)`;
+          if (t < 1) ov._raf = requestAnimationFrame(frame);
+          else { ov._spotX = x; ov._spotY = y; ov._spotR = radius; ov._raf = null; }
+        })(performance.now());
+        // Label badge
+        let badge = document.getElementById('__phantom_label_' + aid);
+        if (!badge) {
+          badge = document.createElement('div');
+          badge.id = '__phantom_label_' + aid;
+          badge.style.cssText =
+            `position:fixed;pointer-events:none;z-index:2147483645;` +
+            `color:#fff;font:600 11px/1 -apple-system,ui-sans-serif,sans-serif;` +
+            `padding:5px 10px 5px 8px;border-radius:20px;white-space:nowrap;` +
+            `box-shadow:0 2px 8px rgba(0,0,0,0.35);` +
+            `transition:left 0.35s cubic-bezier(0.25,0.46,0.45,0.94),` +
+                       `top 0.35s cubic-bezier(0.25,0.46,0.45,0.94),opacity 0.15s;opacity:0;`;
+          document.body.appendChild(badge);
+        }
+        badge.textContent = `⊡ ${aid}`;
+        badge.style.background = col;
+        const bw = badge.offsetWidth || 90;
+        badge.style.left    = Math.min(x + 14, window.innerWidth - bw - 8) + 'px';
+        badge.style.top     = Math.max(y - 50, 8) + 'px';
+        badge.style.opacity = '1';
+      }, [args.x, args.y, agentId, color]);
 
-    // ── Proxy to chrome-devtools-mcp ──
-    // Intercept take_screenshot: first call → full-page low-res overview
-    if (name === 'take_screenshot' && !pageState.overviewTaken && !args.uid && !args.fullPage) {
-      const result = await cdtClient.callTool({
-        name: 'take_screenshot',
-        arguments: { fullPage: true, format: 'jpeg', quality: 20 },
+      session.agents.set(agentId, {
+        agentId, ref: null, label: null,
+        x: args.x, y: args.y, action: 'move', updatedAt: Date.now(),
       });
-      pageState.overviewTaken = true;
-      return result;
+      return { content: [{ type: 'text', text: `Spotlight moved to (${args.x}, ${args.y})${formatAttentionState(session)}` }] };
     }
 
+    // ── Proxy to chrome-devtools-mcp ───────────────────────────
     const result = await cdtClient.callTool({ name, arguments: args });
     return result;
 
@@ -414,4 +616,4 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
-console.error('[PhantomCursor MCP] Server ready — CDP owned by chrome-devtools-mcp subprocess');
+console.error('[PhantomCursor MCP] v0.3 ready — spotlight overlay, cached overview, text-only focus/click');
