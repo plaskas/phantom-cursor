@@ -13,11 +13,19 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0"
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "playwright": "^1.58.2"
   },
   "devDependencies": {
     "vitest": "^2.0.0"
   },
-  "keywords": ["claude", "mcp", "browser", "phantom-cursor", "ai-agent", "dom"],
+  "keywords": [
+    "claude",
+    "mcp",
+    "browser",
+    "phantom-cursor",
+    "ai-agent",
+    "dom"
+  ],
   "license": "MIT"
 }
