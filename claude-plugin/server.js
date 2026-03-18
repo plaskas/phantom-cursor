@@ -295,7 +295,7 @@ const TOOLS = [
   },
   {
     name: 'phantom_snapshot',
-    description: 'Refresh the DOM element list without a screenshot. Returns DOM listing + attention state (text only).',
+    description: 'Fast DOM refresh — no screenshot. Use this instead of phantom_browse when you only need updated @e refs (e.g. after a click opens a dialog). Returns DOM listing + attention state (text only).',
     inputSchema: { type: 'object', properties: {
       rootSelector: { type: 'string', default: 'body' },
       agentId:      { type: 'string', default: 'default' },
@@ -341,11 +341,12 @@ const TOOLS = [
   },
   {
     name: 'phantom_scan',
-    description: 'Sweep eyes + cursor through a sequence of elements in one call — no round trips between steps. Eyes scan ahead, cursor trails. Pass DOM refs (@e12) or CSS selectors. Returns when scan completes.',
+    description: 'Sweep focus through a sequence of elements in one call — no round trips between steps. Cursor stays fixed unless cursorSelectors provided. Optionally clicks a target at the end. Pass DOM refs (@e12) or CSS selectors.',
     inputSchema: { type: 'object', required: ['selectors'], properties: {
-      selectors:       { type: 'array', items: { type: 'string' }, description: 'Ordered list of DOM refs or CSS selectors for eyes to scan through.' },
-      cursorSelectors: { type: 'array', items: { type: 'string' }, description: 'Optional separate waypoints for cursor. Defaults to eyes waypoints with a 1-step lag.' },
-      stepMs:          { type: 'number', default: 200, description: 'Milliseconds between each step (default 200).' },
+      selectors:       { type: 'array', items: { type: 'string' }, description: 'Ordered list of DOM refs or CSS selectors for focus to scan through.' },
+      cursorSelectors: { type: 'array', items: { type: 'string' }, description: 'Optional separate waypoints for cursor.' },
+      clickTarget:     { type: 'string', description: 'DOM ref or selector to click after scan completes — saves a round trip.' },
+      stepMs:          { type: 'number', default: 100, description: 'Milliseconds between each step (default 100).' },
       eyesAgentId:     { type: 'string', default: 'focus' },
       cursorAgentId:   { type: 'string', default: 'cursor' },
     }},
@@ -657,8 +658,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         x: cx, y: cy, action: 'click', updatedAt: Date.now(),
       });
 
-      // Perform actual click at exact coordinates — avoids non-unique CSS selector issues
-      await page.mouse.click(cx, cy);
+      // Find the exact element by matching cached absolute coords, then call el.click()
+      // directly — bypasses CSS pointer-events overlays (modals, backdrops) AND handles
+      // non-unique selectors (e.g. HN story links, AP News classless markup).
+      let _clicked = false;
+      try {
+        _clicked = await page.evaluate(({ sel, rx, ry }) => {
+          const matches = Array.from(document.querySelectorAll(sel));
+          const el = matches.length === 1 ? matches[0] : matches.find(m => {
+            const r = m.getBoundingClientRect();
+            return Math.abs(Math.round(r.x + window.scrollX) - rx) < 15 &&
+                   Math.abs(Math.round(r.y + window.scrollY) - ry) < 15;
+          });
+          if (el) { el.click(); return true; }
+          return false;
+        }, { sel: target.selector, rx: target.rect.x, ry: target.rect.y });
+      } catch (_) {}
+      if (!_clicked) await page.mouse.click(cx, cy);
 
       const text = [
         `Clicked: ${target.ref ?? target.selector} "${target.label}"`,
@@ -921,8 +937,38 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         x: lastCur.cx, y: lastCur.cy, action: 'move', updatedAt: Date.now(),
       });
 
+      // Optional: click a target immediately after scan (saves a round trip)
+      let clickNote = '';
+      if (args.clickTarget) {
+        const ct = await resolveTarget(args.clickTarget);
+        if (!ct.error) {
+          await cdpClickElement(curAgentId, ct.selector);
+          const cx = ct.rect.x + Math.round(ct.rect.w / 2);
+          const cy = ct.rect.y + Math.round(ct.rect.h / 2);
+          let _ctClicked = false;
+          try {
+            _ctClicked = await page.evaluate(({ sel, rx, ry }) => {
+              const matches = Array.from(document.querySelectorAll(sel));
+              const el = matches.length === 1 ? matches[0] : matches.find(m => {
+                const r = m.getBoundingClientRect();
+                return Math.abs(Math.round(r.x + window.scrollX) - rx) < 15 &&
+                       Math.abs(Math.round(r.y + window.scrollY) - ry) < 15;
+              });
+              if (el) { el.click(); return true; }
+              return false;
+            }, { sel: ct.selector, rx: ct.rect.x, ry: ct.rect.y });
+          } catch (_) {}
+          if (!_ctClicked) await page.mouse.click(cx, cy);
+          session.agents.set(curAgentId, {
+            agentId: curAgentId, ref: ct.ref, label: ct.label,
+            x: cx, y: cy, action: 'click', updatedAt: Date.now(),
+          });
+          clickNote = `\nClicked: ${ct.ref ?? ct.selector} "${ct.label}"`;
+        }
+      }
+
       return { content: [{ type: 'text', text:
-        `Scan complete: ${result.steps} steps @ ${stepMs}ms/step\n${formatAttentionState(session)}`
+        `Scan complete: ${result.steps} steps @ ${stepMs}ms/step${clickNote}\n${formatAttentionState(session)}`
       }] };
     }
 
@@ -1048,7 +1094,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     // ── evaluate_script ────────────────────────────────────────
     if (name === 'evaluate_script') {
-      const result = await page.evaluate(args.function);
+      const result = await page.evaluate(`(${args.function})()`);
       return { content: [{ type: 'text', text: `Script ran on page and returned:\n\`\`\`json\n${JSON.stringify(result, null, 2)}\n\`\`\`` }] };
     }
 
